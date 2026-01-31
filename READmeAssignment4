@@ -1,0 +1,43 @@
+A small app that builds a weekly schedule (Mon–Sun) with morning / afternoon / evening shifts, honoring preferences and enforcing constraints. Implemented in Python and C++17 to demonstrate conditionals, loops, branching, and deterministic randomness.
+
+What It Does
+
+Input & Storage: Collect employees and their daily shift preferences (string or list).
+Scheduling Logic:
+
+Max 1 shift/day per employee
+Max 5 days/week per employee
+≥ 2 employees/shift/day (randomly backfill if needed)
+                         
+Conflicts: If a preferred shift is full, try other shifts same day; otherwise carry over to next day.
+Output: Prints a readable Mon–Sun schedule and warnings (unmet minimums, relocation failures).
+
+
+Data Model
+
+Days: Mon, Tue, Wed, Thu, Fri, Sat, Sun
+Shifts: morning, afternoon, evening
+Config:
+
+min_per_shift (default 2)
+max_per_shift (default 4; ≤0 disables)
+max_days_per_employee (default 5)
+random_seed (deterministic runs)
+
+
+Schedule:
+Python: Dict[day][shift] -> List[str]
+C++: unordered_map<string, unordered_map<string, vector<string>>>
+
+
+Preferences: Allow string or list per day; normalized to ranked, valid shifts.
+
+
+How It Works (Short)
+Normalize preferences (lowercase, trim, validate).
+Feasibility check: ensure total capacity ≥ demand; otherwise error with suggestion.
+Preference rounds (0..2): try ranked choices if under caps and not yet assigned that day.
+Fallback: try other shifts same day; if not placed, carry over to next day.
+Backfill: ensure min staffing with seeded-random picks among available employees.
+Trim & relocate: if over max capacity, move to other shifts or next day; warn if not possible.
+Print final schedule + warnings.
