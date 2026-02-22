@@ -1,0 +1,493 @@
+# Task.java 
+
+cat > src/main/java/dps/Task.java << 'EOF' 
+
+package dps; 
+
+ 
+
+public class Task { 
+
+    private final int id; 
+
+    private final String payload; 
+
+ 
+
+    public Task(int id, String payload) { 
+
+        this.id = id; 
+
+        this.payload = payload; 
+
+    } 
+
+ 
+
+    public int getId() { return id; } 
+
+    public String getPayload() { return payload; } 
+
+} 
+
+EOF 
+
+ 
+
+# TaskQueue.java 
+
+cat > src/main/java/dps/TaskQueue.java << 'EOF' 
+
+package dps; 
+
+ 
+
+import java.util.LinkedList; 
+
+import java.util.Queue; 
+
+import java.util.concurrent.locks.Condition; 
+
+import java.util.concurrent.locks.ReentrantLock; 
+
+ 
+
+public class TaskQueue { 
+
+    private final Queue<Task> queue = new LinkedList<>(); 
+
+    private final ReentrantLock lock = new ReentrantLock(); 
+
+    private final Condition notEmpty = lock.newCondition(); 
+
+    private boolean closed = false; 
+
+ 
+
+    public void addTask(Task task) { 
+
+        lock.lock(); 
+
+        try { 
+
+            if (closed) { 
+
+                throw new IllegalStateException("Cannot add task: queue is closed"); 
+
+            } 
+
+            queue.add(task); 
+
+            notEmpty.signal(); 
+
+        } finally { 
+
+            lock.unlock(); 
+
+        } 
+
+    } 
+
+ 
+
+    public Task getTask() throws InterruptedException { 
+
+        lock.lock(); 
+
+        try { 
+
+            while (queue.isEmpty() && !closed) { 
+
+                notEmpty.await(); 
+
+            } 
+
+            if (queue.isEmpty() && closed) { 
+
+                return null; 
+
+            } 
+
+            return queue.poll(); 
+
+        } finally { 
+
+            lock.unlock(); 
+
+        } 
+
+    } 
+
+ 
+
+    public void close() { 
+
+        lock.lock(); 
+
+        try { 
+
+            closed = true; 
+
+            notEmpty.signalAll(); 
+
+        } finally { 
+
+            lock.unlock(); 
+
+        } 
+
+    } 
+
+} 
+
+EOF 
+
+ 
+
+# ResultsCollector.java 
+
+cat > src/main/java/dps/ResultsCollector.java << 'EOF' 
+
+package dps; 
+
+ 
+
+import java.io.BufferedWriter; 
+
+import java.io.FileWriter; 
+
+import java.io.IOException; 
+
+import java.util.ArrayList; 
+
+import java.util.Collections; 
+
+import java.util.List; 
+
+ 
+
+public class ResultsCollector implements AutoCloseable { 
+
+    private final List<String> results = Collections.synchronizedList(new ArrayList<>()); 
+
+    private final BufferedWriter writer; 
+
+    private final Object fileLock = new Object(); 
+
+ 
+
+    public ResultsCollector(String outputPath) throws IOException { 
+
+        this.writer = new BufferedWriter(new FileWriter(outputPath, false)); 
+
+    } 
+
+ 
+
+    public void record(String result) throws IOException { 
+
+        results.add(result); 
+
+        synchronized (fileLock) { 
+
+            writer.write(result); 
+
+            writer.newLine(); 
+
+        } 
+
+    } 
+
+ 
+
+    public List<String> snapshot() { 
+
+        synchronized (results) { 
+
+            return new ArrayList<>(results); 
+
+        } 
+
+    } 
+
+ 
+
+    @Override 
+
+    public void close() throws IOException { 
+
+        synchronized (fileLock) { 
+
+            writer.flush(); 
+
+            writer.close(); 
+
+        } 
+
+    } 
+
+} 
+
+EOF 
+
+ 
+
+# Worker.java 
+
+cat > src/main/java/dps/Worker.java << 'EOF' 
+
+package dps; 
+
+ 
+
+import java.io.IOException; 
+
+import java.util.concurrent.ThreadLocalRandom; 
+
+import java.util.logging.Level; 
+
+import java.util.logging.Logger; 
+
+ 
+
+public class Worker implements Runnable { 
+
+    private final int id; 
+
+    private final TaskQueue queue; 
+
+    private final ResultsCollector collector; 
+
+    private final Logger logger; 
+
+ 
+
+    public Worker(int id, TaskQueue queue, ResultsCollector collector, Logger logger) { 
+
+        this.id = id; 
+
+        this.queue = queue; 
+
+        this.collector = collector; 
+
+        this.logger = logger; 
+
+    } 
+
+ 
+
+    @Override 
+
+    public void run() { 
+
+        logger.info(() -> String.format("Worker-%d started", id)); 
+
+        try { 
+
+            while (true) { 
+
+                Task task = queue.getTask(); 
+
+                if (task == null) { 
+
+                    logger.info(() -> String.format("Worker-%d: queue closed, exiting", id)); 
+
+                    break; 
+
+                } 
+
+ 
+
+                try { 
+
+                    String result = process(task); 
+
+                    collector.record(result); 
+
+                } catch (IOException e) { 
+
+                    logger.log(Level.SEVERE, 
+
+                            String.format("Worker-%d I/O error for task %d: %s", id, task.getId(), e.getMessage()), e); 
+
+                } catch (RuntimeException e) { 
+
+                    logger.log(Level.SEVERE, 
+
+                            String.format("Worker-%d runtime error for task %d: %s", id, task.getId(), e.getMessage()), e); 
+
+                } 
+
+            } 
+
+        } catch (InterruptedException e) { 
+
+            Thread.currentThread().interrupt(); 
+
+            logger.log(Level.WARNING, String.format("Worker-%d interrupted", id), e); 
+
+        } finally { 
+
+            logger.info(() -> String.format("Worker-%d completed", id)); 
+
+        } 
+
+    } 
+
+ 
+
+    private String process(Task task) { 
+
+        try { 
+
+            long delay = ThreadLocalRandom.current().nextLong(100, 401); 
+
+            Thread.sleep(delay); 
+
+        } catch (InterruptedException e) { 
+
+            Thread.currentThread().interrupt(); 
+
+            throw new RuntimeException("Interrupted during processing"); 
+
+        } 
+
+ 
+
+        String transformed = task.getPayload().toUpperCase(); 
+
+        return String.format("task=%d, worker=%d, result=%s", task.getId(), id, transformed); 
+
+    } 
+
+} 
+
+EOF 
+
+ 
+
+# Main.java 
+
+cat > src/main/java/dps/Main.java << 'EOF' 
+
+package dps; 
+
+ 
+
+import java.io.IOException; 
+
+import java.util.concurrent.ExecutorService; 
+
+import java.util.concurrent.Executors; 
+
+import java.util.concurrent.TimeUnit; 
+
+import java.util.logging.*; 
+
+ 
+
+public class Main { 
+
+    public static void main(String[] args) { 
+
+        int numWorkers = 4; 
+
+        int numTasks = 20; 
+
+        String output = "results_java.txt"; 
+
+ 
+
+        Logger logger = Logger.getLogger("DPS"); 
+
+        configureLogger(logger); 
+
+ 
+
+        TaskQueue queue = new TaskQueue(); 
+
+ 
+
+        try (ResultsCollector collector = new ResultsCollector(output)) { 
+
+            ExecutorService pool = Executors.newFixedThreadPool(numWorkers); 
+
+ 
+
+            for (int i = 0; i < numWorkers; i++) { 
+
+                pool.submit(new Worker(i + 1, queue, collector, logger)); 
+
+            } 
+
+ 
+
+            for (int i = 0; i < numTasks; i++) { 
+
+                queue.addTask(new Task(i + 1, "payload-" + (i + 1))); 
+
+            } 
+
+ 
+
+            queue.close(); 
+
+ 
+
+            pool.shutdown(); 
+
+            boolean terminated = pool.awaitTermination(60, TimeUnit.SECONDS); 
+
+            if (!terminated) { 
+
+                logger.warning("Forcing shutdown due to timeout"); 
+
+                pool.shutdownNow(); 
+
+            } 
+
+ 
+
+            logger.info("All workers finished. Results written to " + output); 
+
+ 
+
+        } catch (IOException e) { 
+
+            logger.log(Level.SEVERE, "Failed to open results file: " + e.getMessage(), e); 
+
+        } catch (InterruptedException e) { 
+
+            Thread.currentThread().interrupt(); 
+
+            logger.log(Level.SEVERE, "Main thread interrupted during shutdown", e); 
+
+        } catch (RuntimeException e) { 
+
+            logger.log(Level.SEVERE, "Fatal runtime error: " + e.getMessage(), e); 
+
+        } 
+
+    } 
+
+ 
+
+    private static void configureLogger(Logger logger) { 
+
+        logger.setUseParentHandlers(false); 
+
+        ConsoleHandler handler = new ConsoleHandler(); 
+
+        handler.setLevel(Level.INFO); 
+
+        handler.setFormatter(new SimpleFormatter()); 
+
+        logger.addHandler(handler); 
+
+        logger.setLevel(Level.INFO); 
+
+    } 
+
+} 
+
+EOF 
