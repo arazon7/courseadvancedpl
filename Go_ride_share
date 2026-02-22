@@ -1,0 +1,277 @@
+cat > main.go << 'EOF' 
+
+package main 
+
+ 
+
+import ( 
+
+    "bufio" 
+
+    "context" 
+
+    "flag" 
+
+    "fmt" 
+
+    "log" 
+
+    "math/rand" 
+
+    "os" 
+
+    "os/signal" 
+
+    "strings" 
+
+    "sync" 
+
+    "syscall" 
+
+    "time" 
+
+) 
+
+ 
+
+type Task struct { 
+
+    ID      int 
+
+    Payload string 
+
+} 
+
+ 
+
+func worker(ctx context.Context, id int, tasks <-chan Task, results chan<- string, logger *log.Logger, wg *sync.WaitGroup) { 
+
+    defer wg.Done() 
+
+    logger.Printf("worker-%d started", id) 
+
+ 
+
+    defer func() { 
+
+        if r := recover(); r != nil { 
+
+            logger.Printf("worker-%d recovered from panic: %v", id, r) 
+
+        } 
+
+        logger.Printf("worker-%d completed", id) 
+
+    }() 
+
+ 
+
+    r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id))) 
+
+ 
+
+    for { 
+
+        select { 
+
+        case <-ctx.Done(): 
+
+            logger.Printf("worker-%d: context cancelled", id) 
+
+            return 
+
+        case t, ok := <-tasks: 
+
+            if !ok { 
+
+                logger.Printf("worker-%d: tasks channel closed, exiting", id) 
+
+                return 
+
+            } 
+
+            time.Sleep(time.Duration(100+r.Intn(301)) * time.Millisecond) 
+
+            result := fmt.Sprintf("task=%d, worker=%d, result=%s", t.ID, id, strings.ToUpper(t.Payload)) 
+
+            select { 
+
+            case results <- result: 
+
+            case <-ctx.Done(): 
+
+                logger.Printf("worker-%d: context cancelled while sending result", id) 
+
+                return 
+
+            } 
+
+        } 
+
+    } 
+
+} 
+
+ 
+
+func writer(results <-chan string, outPath string, logger *log.Logger, done chan<- struct{}) { 
+
+    defer close(done) 
+
+ 
+
+    f, err := os.Create(outPath) 
+
+    if err != nil { 
+
+        logger.Printf("writer: failed to create file %q: %v", outPath, err) 
+
+        return 
+
+    } 
+
+    defer func() { 
+
+        if err := f.Close(); err != nil { 
+
+            logger.Printf("writer: error closing file: %v", err) 
+
+        } 
+
+    }() 
+
+ 
+
+    buf := bufio.NewWriter(f) 
+
+    defer func() { 
+
+        if err := buf.Flush(); err != nil { 
+
+            logger.Printf("writer: error flushing buffer: %v", err) 
+
+        } 
+
+    }() 
+
+ 
+
+    for line := range results { 
+
+        if _, err := buf.WriteString(line + "\n"); err != nil { 
+
+            logger.Printf("writer: write error: %v", err) 
+
+        } 
+
+    } 
+
+    logger.Printf("writer: completed, results written to %s", outPath) 
+
+} 
+
+ 
+
+func main() { 
+
+    var ( 
+
+        workers  = flag.Int("workers", 4, "number of worker goroutines") 
+
+        numTasks = flag.Int("tasks", 20, "number of tasks to enqueue") 
+
+        outPath  = flag.String("out", "results_go.txt", "output file for results") 
+
+    ) 
+
+    flag.Parse() 
+
+ 
+
+    logger := log.New(os.Stdout, "[DPS] ", log.LstdFlags|log.Lmicroseconds) 
+
+ 
+
+    ctx, cancel := context.WithCancel(context.Background()) 
+
+    defer cancel() 
+
+ 
+
+    sigCh := make(chan os.Signal, 1) 
+
+    signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM) 
+
+    go func() { 
+
+        s := <-sigCh 
+
+        logger.Printf("received signal: %v, initiating shutdown", s) 
+
+        cancel() 
+
+    }() 
+
+ 
+
+    tasks := make(chan Task) 
+
+    results := make(chan string, 64) 
+
+ 
+
+    writerDone := make(chan struct{}) 
+
+    go writer(results, *outPath, logger, writerDone) 
+
+ 
+
+    var wg sync.WaitGroup 
+
+    for i := 0; i < *workers; i++ { 
+
+        wg.Add(1) 
+
+        go worker(ctx, i+1, tasks, results, logger, &wg) 
+
+    } 
+
+ 
+
+    go func() { 
+
+        defer close(tasks) 
+
+        for i := 0; i < *numTasks; i++ { 
+
+            select { 
+
+            case <-ctx.Done(): 
+
+                logger.Printf("producer: context cancelled, stopping task production") 
+
+                return 
+
+            case tasks <- Task{ID: i + 1, Payload: fmt.Sprintf("payload-%d", i+1)}: 
+
+            } 
+
+        } 
+
+    }() 
+
+ 
+
+    wg.Wait() 
+
+    close(results) 
+
+    <-writerDone 
+
+ 
+
+    logger.Printf("all workers finished; results file: %s", *outPath) 
+
+} 
+
+EOF 
